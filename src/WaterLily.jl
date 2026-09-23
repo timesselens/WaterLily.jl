@@ -147,7 +147,10 @@ end
 Call `step!(sim)` until the dimensionless time `t_end` (or `max_steps` steps), and return `init`
 plus the sum of what `step!` returns (values of `nothing` are skipped). `sim_step!(sim,t_end)` is
 `evolve!` with a plain time step; a running cost, e.g. a time-averaged force, is accumulated by
-returning it from `step!` (with `init` a zero of its type).
+returning it from `step!` (with `init` a zero of its type). With Enzyme, reverse mode through
+`evolve!` stores one checkpoint per step instead of the whole trajectory, and replays the steps
+backwards, which leaves the flow as it was before `evolve!`. The checkpoint holds `u`, `p`, `σ` and
+the time steps, so `step!` must recompute everything else it reads (as `sim_step!` does).
 """
 function evolve!(step!::F,sim::AbstractSimulation,t_end;max_steps=typemax(Int),verbose=false,init=nothing) where F
     steps₀ = length(sim.flow.Δt); J = init

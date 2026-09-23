@@ -1,7 +1,8 @@
 module WaterLilyEnzymeCoreExt
 
 using WaterLily
-using WaterLily: launch!, itemarg, sum_view, max_all, sum_dims, solver!, update!, @loop, inside, δ, CIj, slice
+using WaterLily: launch!, itemarg, sum_view, max_all, sum_dims, solver!, update!, @loop, inside, δ, CIj, slice,
+    evolve!, sim_time, sim_info, accumulate_cost, AbstractSimulation
 using EnzymeCore
 using EnzymeCore.EnzymeRules
 import KernelAbstractions as KA
@@ -326,6 +327,60 @@ function _zero_scratch!(dp::WaterLily.MultiLevelPoisson)
         fill!(l.x, 0); fill!(l.r, 0); fill!(l.ϵ, 0); fill!(l.z, 0)
     end
     return nothing
+end
+
+## time loop: `evolve!` with one checkpoint per step
+#
+# Differentiating `evolve!`'s loop directly would keep every value Enzyme needs from every step. Instead
+# the forward pass stores what a step reads before writing it (u, p, σ and the number of time steps) and
+# the reverse pass replays the steps backwards: restore the checkpoint, run the step as a split-mode thunk,
+# seed the time step Δt it appended with its cotangent (accumulated by the later steps), run its reverse.
+# The flow is left as it was before `evolve!`.
+
+_apply(f::F, s) where {F} = f(s)
+
+_checkpoint(s) = (copy(s.flow.u), copy(s.flow.p), copy(s.flow.σ), length(s.flow.Δt))
+function _restore!(s, (u, p, σ, n))
+    copyto!(s.flow.u, u); copyto!(s.flow.p, p); copyto!(s.flow.σ, σ)
+    resize!(s.flow.Δt, n)
+    return s
+end
+
+function EnzymeRules.augmented_primal(config::RevConfigWidth{1}, ::Const{typeof(evolve!)}, ::Type{RT},
+        f::Annotation, sim::Duplicated{<:AbstractSimulation}, t_end::Annotation;
+        max_steps = typemax(Int), verbose = false, init = nothing) where {RT}
+    s, ds = sim.val, sim.dval
+    steps₀ = length(s.flow.Δt); snaps = Any[]; J = init
+    while sim_time(s) < t_end.val && length(s.flow.Δt) - steps₀ < max_steps
+        push!(snaps, _checkpoint(s))
+        J = accumulate_cost(J, f.val(s))
+        verbose && sim_info(s)
+    end
+    resize!(ds.flow.Δt, length(s.flow.Δt)) # the shadow follows the appended time steps (as zeros)
+    ds.flow.Δt[steps₀+1:end] .= 0
+    return AugmentedReturn(needs_primal(config) ? J : nothing, nothing, snaps)
+end
+
+function EnzymeRules.reverse(config::RevConfigWidth{1}, ::Const{typeof(evolve!)}, dret, snaps,
+        f::Annotation, sim::Duplicated{<:AbstractSimulation}, t_end::Annotation; kwargs...)
+    dt_end = t_end isa Active ? zero(t_end.val) : nothing
+    isempty(snaps) && return (nothing, nothing, dt_end)
+    s, ds = sim.val, sim.dval
+    f isa Const || error("WaterLily evolve!: a step function with active captured values is not supported in reverse mode")
+    J̄ = dret isa Active ? dret.val : nothing
+    mode = EnzymeCore.set_runtime_activity(ReverseSplitWithPrimal, config)
+    fwd, rev = EnzymeCore.autodiff_thunk(mode, Const{typeof(_apply)}, J̄ === nothing ? Const : Active,
+        Core.Typeof(f), Duplicated{typeof(s)})
+    for k in length(snaps):-1:1
+        n = snaps[k][4]
+        c = ds.flow.Δt[n+1] # cotangent of the Δt appended by step k
+        _restore!(s, snaps[k]); resize!(ds.flow.Δt, n)
+        tape, _, _ = fwd(Const(_apply), f, sim)
+        ds.flow.Δt[end] = c # set, not add: the slot the forward pass appended to the shadow is not zeroed
+        J̄ === nothing ? rev(Const(_apply), f, sim, tape) : rev(Const(_apply), f, sim, J̄, tape)
+    end
+    _restore!(s, snaps[1]); resize!(ds.flow.Δt, snaps[1][4]) # the state before evolve!
+    return (nothing, nothing, dt_end)
 end
 
 end # module
