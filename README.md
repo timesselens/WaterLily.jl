@@ -140,6 +140,33 @@ To run on other GPUs, swap the package and the memory type: `using AMDGPU` with 
 
 Finally, KernelAbstractions does incur some CPU allocations for every loop, but other than this `sim_step!` is completely non-allocating. This is one reason why the speed-up improves as the size of the simulation increases.
 
+## Reverse-mode AD with Enzyme
+
+WaterLily can be differentiated with [ForwardDiff](https://github.com/JuliaDiff/ForwardDiff.jl) (dual numbers, one derivative per run) and, for many parameters at once, in reverse mode with [Enzyme](https://github.com/EnzymeAD/Enzyme.jl). Write the cost as a function of the simulation and the parameters, and pass the simulation with a zeroed shadow:
+```julia
+using WaterLily, StaticArrays, Enzyme
+function plate(θ, L) # a flat plate rotated by θ
+    s, c = sincos(θ); C = SA[oftype(θ, L), oftype(θ, L)]
+    AutoBody((ξ, _) -> √sum(abs2, ξ - SA[zero(θ), clamp(ξ[1], -L/2, L/2)]) - 2, (x, _) -> SA[c -s; s c] * (x - C))
+end
+function drag(sim, θ)
+    sim.body = plate(θ, sim.L); measure!(sim)
+    sim_step!(sim, 1e9; max_steps=10, poisson_kwargs=(;tol=1e-8)) # tighter pressure solves than the default
+    WaterLily.pressure_force(sim)[1]
+end
+θ = π/36; L = 32
+sim = Simulation((2L, 2L), (1, 0), L; ν=L/100, body=plate(θ, L), T=typeof(θ))
+dθ = autodiff(set_runtime_activity(Reverse), drag, Active, Duplicated(sim, Enzyme.make_zero(sim)), Active(θ))[1][2]
+```
+The rules in `WaterLilyEnzymeCoreExt` cover what a time step does on the device: `@loop` kernels, the reductions and the pressure solve (with an implicit-function adjoint). The time loop of `sim_step!(sim, t_end)` and `evolve!` stores one checkpoint per step and replays the steps backwards, which leaves the flow as it was. Some things to keep in mind:
+ - The pressure is pinned to zero mean over the fluid cells after every solve, so `sum(p)` is a constant; forces and velocities are fine as costs.
+ - The adjoint of the pressure solve differentiates its converged solution, not the solver's iterations. With a loose `tol` the gradient can differ from ForwardDiff's, which differentiates the iterations; the two agree as `tol` decreases.
+ - Memory grows with the number of steps (one copy of `u`, `p` and `σ` per step).
+ - New device work in a time step should go through `@loop` and the helpers (`fill_all!`, `sum_view`, …); a plain broadcast or `sum` over a GPU array is not covered by the rules.
+ - The CPU works with released versions of Enzyme. GPUs need Enzyme with GPUCompiler 2 support and a few fixes that are not released yet.
+
+The Enzyme extension builds on Bernat Font's first version (#285) and follows the design of the Enzyme rules of KernelAbstractions, CUDA.jl and Metal.jl for GPU kernels.
+
 ## Contributing and issues
 
 We always appreciate new contributions, so please [submit a pull request](https://github.com/WaterLily-jl/WaterLily.jl/compare) with your changes and help us make WaterLily even better! Note that contributions need to be submitted together with benchmark results - WaterLily should always be fast! 😃 For this, we have a [fully automated benchmarking suite](https://github.com/WaterLily-jl/WaterLily-Benchmarks) that conducts performance tests. In short, to compare your changes with the latest WaterLily, clone the that repo and run the benchmarks with

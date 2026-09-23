@@ -16,6 +16,11 @@ GPU backends are opt-in and installed on demand (they are not test dependencies)
 Metal has no Float64 support, so only Float32 test sets (e.g. "float32") can pass on it.
 So "all" does not include it: request "metal" explicitly (Apple only).
 
+Reverse-mode AD with Enzyme (test_enzyme.jl) is opt-in as well: WATERLILY_ENZYME=true.
+Packages installed on demand are only added when they are not loadable already, so running
+this file directly in an environment with developed checkouts keeps them, e.g.
+    WATERLILY_ENZYME=true julia --project=<env> test/runtests.jl enzyme
+
 Run a subset by passing set name(s) (matched with startswith) and/or runner flags
 (--jobs=N, --list, --verbose, --quickfail), e.g.
     julia --project -e 'using Pkg; Pkg.test(test_args=["poisson","flow"])'
@@ -29,19 +34,24 @@ _cuda = any(b -> b in ("cuda","all"), WATERLILY_BACKENDS)
 _amdgpu = any(b -> b in ("amdgpu","all"), WATERLILY_BACKENDS)
 _metal = "metal" in WATERLILY_BACKENDS && Sys.isapple() # not part of "all" since most test sets are Float64
 
-# GPU packages are not test deps: install the requested ones once here in the main process. A backend that cannot be installed is skipped
-_cuda &&
-    try Pkg.add("CUDA") catch e; @warn "Requested CUDA could not be installed; skipping" exception=e; global _cuda = false end
-_amdgpu &&
-    try Pkg.add("AMDGPU") catch e; @warn "Requested AMDGPU could not be installed; skipping" exception=e; global _amdgpu = false end
-_metal &&
-    try Pkg.add("Metal") catch e; @warn "Requested Metal could not be installed; skipping" exception=e; global _metal = false end
+_enzyme = lowercase(get(ENV, "WATERLILY_ENZYME", "false")) == "true"
+
+# GPU packages and Enzyme are not test deps: install the requested ones once here in the main process,
+# unless they are loadable already. A package that cannot be installed is skipped
+function ensure(pkg)
+    isnothing(Base.find_package(pkg)) || return true
+    try Pkg.add(pkg); return true catch e; @warn "Requested $pkg could not be installed; skipping" exception=e; return false end
+end
+_cuda = _cuda && ensure("CUDA")
+_amdgpu = _amdgpu && ensure("AMDGPU")
+_metal = _metal && ensure("Metal")
+_enzyme = _enzyme && ensure("Enzyme")
 
 # Discover test sets: every test_*.jl, gated by the WaterLily `backend` preference
 const TESTDIR = @__DIR__
 is_test_file(f) = startswith(f, "test_") && endswith(f, ".jl")
 setname(f) = f[6:end-3] # "test_core.jl" -> "core"
-wanted(name) = backend == "SIMD" ? name == "alloc" : name != "alloc"
+wanted(name) = name == "enzyme" ? _enzyme : backend == "SIMD" ? name == "alloc" : name != "alloc"
 testsuite = Dict{String,Expr}()
 for (root, _dirs, files) in walkdir(TESTDIR), f in filter(is_test_file, files)
     name = setname(f)
