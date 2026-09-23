@@ -132,7 +132,7 @@ sumtype(backend,T) = supports_float64(backend) ? promote_type(Float64,T) : T
 
 Compute the pressure force on an immersed body.
 """
-pressure_force(sim) = pressure_force(sim.flow,sim.body)
+pressure_force(sim) = with_body(pressure_force,sim)
 pressure_force(flow,body) = pressure_force(flow.p,flow.f,body,time(flow))
 function pressure_force(p,df,body,t=0)
     Tp = eltype(p); To = sumtype(p)
@@ -153,7 +153,7 @@ Rate-of-strain tensor.
 
 Compute the viscous force on an immersed body.
 """
-viscous_force(sim) = viscous_force(sim.flow,sim.body)
+viscous_force(sim) = with_body(viscous_force,sim)
 viscous_force(flow,body) = viscous_force(flow.u,flow.ν,flow.f,body,time(flow))
 function viscous_force(u,ν,df,body,t=0)
     Tu = eltype(u); To = sumtype(u)
@@ -176,7 +176,7 @@ using LinearAlgebra: cross
 Computes the pressure moment on an immersed body relative to point x₀.
 `x₀` is converted to the element type of the pressure field.
 """
-pressure_moment(x₀,sim) = pressure_moment(x₀,sim.flow,sim.body)
+pressure_moment(x₀,sim) = with_body((flow,body,x₀)->pressure_moment(x₀,flow,body),sim,x₀)
 pressure_moment(x₀,flow,body) = pressure_moment(x₀,flow.p,flow.f,body,time(flow))
 function pressure_moment(x₀,p,df,body,t=0)
     Tp = eltype(p); To = sumtype(p)
@@ -191,7 +191,7 @@ end
 Computes the viscous moment on an immersed body relative to point x₀.
 `x₀` is converted to the element type of the velocity field.
 """
-viscous_moment(x₀,sim) = viscous_moment(x₀,sim.flow,sim.body)
+viscous_moment(x₀,sim) = with_body((flow,body,x₀)->viscous_moment(x₀,flow,body),sim,x₀)
 viscous_moment(x₀,flow,body) = viscous_moment(x₀,flow.u,flow.ν,flow.f,body,time(flow))
 function viscous_moment(x₀,u,ν,df,body,t=0)
     Tu = eltype(u); To = sumtype(u)

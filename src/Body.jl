@@ -26,29 +26,31 @@ of size `2+ϵ` around the body. This function also fills `flow.σ` with the sign
 See Maertens & Weymouth, doi:[10.1016/j.cma.2014.09.007](https://doi.org/10.1016/j.cma.2014.09.007).
 """
 function measure!(a::AbstractFlow{N,T},body::AbstractBody;t=zero(T),ϵ=1) where {N,T}
+    ϵT = T(ϵ) # kernel width in the field type (e.g. no Float64 on Metal)
     fill_all!(a.V,zero(T)); fill_all!(a.μ₀,one(T)); fill_all!(a.μ₁,zero(T)); d²=T(2+ϵ)^2
     measure_sdf!(a.σ, body, t; fastd²=d²) # measure separately to allow specialization
     @fastmath @inline function fill!(μ₀,μ₁,V,d,I)
         if d[I]^2<d²
-            for i ∈ 1:N
-                dᵢ,nᵢ,Vᵢ = measure(body,loc(i,I,T),t,fastd²=d²)
-                dᵢ = abs(dᵢ) ≤ 0.5 ? dᵢ : copysign(dᵢ,d[I]) # enforce sign consistency
+            ntuple(Val(N)) do i # unrolled at compile time: straight-line kernels (no loop caches for AD)
+                d₀,nᵢ,Vᵢ = measure(body,loc(i,I,T),t,fastd²=d²)
+                dᵢ = abs(d₀) ≤ 0.5 ? d₀ : copysign(d₀,d[I]) # enforce sign consistency
                 V[I,i] = Vᵢ[i]
-                μ₀[I,i] = WaterLily.μ₀(dᵢ,ϵ)
-                for j ∈ 1:N
-                    μ₁[I,i,j] = WaterLily.μ₁(dᵢ,ϵ)*nᵢ[j]
-                end
+                μ₀[I,i] = WaterLily.μ₀(dᵢ,ϵT)
+                fillμ₁!(μ₁,I,i,WaterLily.μ₁(dᵢ,ϵT),nᵢ,Val(N))
             end
         elseif d[I]<zero(T)
-            for i ∈ 1:N
-                μ₀[I,i] = zero(T)
-            end
+            ntuple(i -> (μ₀[I,i] = zero(T)), Val(N))
         end
+        return nothing
     end
     @loop fill!(a.μ₀,a.μ₁,a.V,a.σ,I) over I ∈ inside(a.p)
     BC!(a.μ₀,zeros(SVector{N,T}),false,a.perdir) # BC on μ₀, don't fill normal component yet
     BC!(a.V ,zeros(SVector{N,T}),a.exitBC,a.perdir)
 end
+
+# μ₁[I,i,j] = m*n[j] for every j. `n` is an argument: a closure capturing it is built and boxed for every
+# cell when `measure` returns a Union (e.g. a Float64 sdf in a Float32 flow).
+@fastmath @inline fillμ₁!(μ₁,I,i,m,n,::Val{N}) where N = ntuple(j -> (μ₁[I,i,j] = m*n[j]; nothing), Val(N))
 
 # Convolution kernel and its moments
 @fastmath kern(d) = (1+cospi(d))/2

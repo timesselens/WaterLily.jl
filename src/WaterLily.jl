@@ -89,13 +89,13 @@ Constructor for a WaterLily.jl simulation:
 
 See the repository [WaterLily-Examples](https://github.com/WaterLily-jl/WaterLily-Examples) for more examples.
 """
-mutable struct Simulation <: AbstractSimulation
+mutable struct Simulation{F<:AbstractFlow,P<:AbstractPoisson} <: AbstractSimulation
     U :: Number # velocity scale
     L :: Number # length scale
     ϵ :: Number # kernel width
-    flow :: AbstractFlow
+    flow :: F # concretely typed: `sim.flow` and `sim.pois` are type-stable (and never replaced)
     body :: AbstractBody
-    pois :: AbstractPoisson
+    pois :: P
     function Simulation(dims::NTuple{N}, uBC, L::Number;
                         Δt=0.25, ν=0., g=nothing, U=nothing, ϵ=1, perdir=(),
                         u0=nothing, uλ=nothing, exitBC=false, λ=quick, body::AbstractBody=NoBody(),
@@ -108,7 +108,8 @@ mutable struct Simulation <: AbstractSimulation
         check_fn(uBC,N,T,3); check_fn(g,N,T,3); check_fn(u0,N,T,2)
         flow = flow_ctor(dims,uBC;u0,Δt,ν,g,λ,T,mem,perdir,exitBC)
         measure!(flow,body;ϵ)
-        new(U,L,ϵ,flow,body,pois_ctor(flow))
+        pois = pois_ctor(flow)
+        new{typeof(flow),typeof(pois)}(U,L,ϵ,flow,body,pois)
     end
 end
 
@@ -172,9 +173,19 @@ end
 Measure a dynamic `body` to update the `flow` and `pois` coefficients.
 """
 function measure!(sim::AbstractSimulation,t=sum(sim.flow.Δt))
-    measure!(sim.flow,sim.body;t,ϵ=sim.ϵ)
+    with_body(measure_body!,sim,t,sim.ϵ)
     update!(sim.pois)
 end
+measure_body!(flow,body,t,ϵ) = measure!(flow,body;t,ϵ)
+
+# `sim.body` is abstractly typed (a body can be replaced), so a call that takes it is dispatched at run time.
+# `with_body(f,sim,args...)` calls `f(sim.flow,sim.body,args...)` behind a function barrier: the run-time
+# dispatch only sees `sim`, the body's type and `args` (for `measure!`, `ϵ`, which is abstractly typed too),
+# and `f` reads the body with its type known. Enzyme needs this: it passes an immutable body with active
+# parameters to a call that is dispatched at run time only through a `Ref`, and the shadow that
+# `Enzyme.make_zero(sim)` builds holds the body itself.
+with_body(f::F,sim,args...) where F = _with_body(f,sim,typeof(sim.body),args...)
+_with_body(f::F,sim,::Type{B},args...) where {F,B} = f(sim.flow,sim.body::B,args...)
 
 """
     sim_info(sim::AbstractSimulation)
