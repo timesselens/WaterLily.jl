@@ -76,3 +76,11 @@ end
     println("▶ Allocated (aniso sim_step! remeasure) "*@sprintf("%.2f", r.memory/1e3)*" KiB")
     @test r.memory < 1000 # less than 1 KiB; ~0.45 KiB clean, ~2 KiB if a V-cycle call boxes
 end
+
+@testset "@loop (SIMD) is inbounds as a whole" begin
+    # `@inbounds` goes around the whole `@simd` loop, so that it covers `@simd`'s own index arithmetic as well
+    wraps_simd(ex) = ex isa Expr && ((ex.head == :macrocall && ex.args[1] == Symbol("@inbounds") &&
+        ex.args[end] isa Expr && ex.args[end].head == :macrocall && ex.args[end].args[1] == Symbol("@simd")) ||
+        any(wraps_simd, ex.args))
+    @test wraps_simd(@macroexpand1 WaterLily.@loop a[I] = b[I] over I ∈ CartesianIndices(a))
+end

@@ -107,7 +107,7 @@ For example
 
 becomes
 
-    @simd for I ∈ R
+    @inbounds @simd for I ∈ R
         @fastmath @inbounds a[I,i] += sum(loc(i,I))
     end
 
@@ -130,7 +130,7 @@ macro loop(args...)
     setdiff!(sym,[I]) # don't want to pass I as an argument
     symT = [gensym() for _ in 1:length(sym)] # generate a list of types for each symbol
     symWtypes = joinsymtype(rep.(sym),symT) # symbols with types: [a::A, b::B, ...]
-    @gensym(kern, kern_) # generate unique kernel function names for serial and KA execution
+    @gensym(kern, kern_, r) # generate unique names for the kernel functions (serial and KA) and the range
     @static if backend == "KernelAbstractions"
         return quote
             @kernel function $kern_($(symWtypes...),@Const(I0)) where {$(symT...)} # replace composite arguments
@@ -146,7 +146,8 @@ macro loop(args...)
     else # backend == "SIMD"
         return quote
             function $kern($(symWtypes...)) where {$(symT...)}
-                @simd for $I ∈ $R
+                $r = $R # `@inbounds` covers the loop, including `@simd`'s index arithmetic, but not the range
+                @inbounds @simd for $I ∈ $r
                     @fastmath @inbounds $ex
                 end
             end
