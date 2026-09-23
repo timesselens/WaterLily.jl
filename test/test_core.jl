@@ -16,6 +16,23 @@
     sym = [:a, :b, :c]
     @test WaterLily.joinsymtype(sym,[:A,:B,:C]) == Expr[:(a::A), :(b::B), :(c::C)]
 
+    # @loop and launch!: a type used in the loop body, and launch! itself
+    fillT!(a,::Type{T}) where T = WaterLily.@loop a[I] = T(I[1])+one(T) over I ∈ CartesianIndices(a)
+    for f ∈ arrays
+        a = zeros(Float32,4,3) |> f
+        fillT!(a,Float32)
+        @test Array(a) == Float32[i+1 for i ∈ 1:4, j ∈ 1:3]
+        b = zeros(Float32,4) |> f
+        WaterLily.launch!((I,b,x) -> (b[I] = x; nothing), CartesianIndices((2:3,)), b, 2f0)
+        @test Array(b) == Float32[0,2,2,0]
+    end
+    @test_throws ArgumentError WaterLily.launch!((I,x...) -> nothing, CartesianIndices((1,)), zeros(1), ntuple(Returns(0),16)...)
+    # the type reaches the kernel as a bits marker, so the CPU kernels are not called dynamically per workgroup
+    if WaterLily.backend == "KernelAbstractions"
+        a = zeros(Float32,256,256); fillT!(a,Float32)
+        @test (@allocations fillT!(a,Float32)) < 200
+    end
+
     for f ∈ arrays
         Ng, D, U = (6, 6), 2, (1.0, 0.5)
         u = rand(Ng..., D) |> f # vector

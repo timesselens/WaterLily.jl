@@ -1,8 +1,8 @@
-using KernelAbstractions: get_backend, @index, @kernel, supports_float64
+using KernelAbstractions: get_backend, @index, @kernel, @Const, supports_float64
 using LoggingExtras
 
 # custom log macro
-_psolver = Logging.LogLevel(-123) # custom log level for pressure solver, needs the negative sign
+const _psolver = Logging.LogLevel(-123) # custom log level for pressure solver, needs the negative sign
 macro log(exs...)
     quote
         @logmsg _psolver $(map(x -> esc(x), exs)...)
@@ -96,6 +96,41 @@ function set_backend(new_backend::String)
 end
 
 """
+    launch!(f, R, args...)
+
+Run `f(I, args...)` for every `I ∈ R` in a KernelAbstractions kernel on the backend of `first(args)`.
+This is what [`@loop`](@ref) expands to on the KernelAbstractions backend: `f` is the loop body and
+`args` are the arrays and values it uses. The loops share a few module-level kernels (one per number
+of arguments, up to 16), so each loop is a plain function of `I` that AD tools can differentiate item
+by item. An argument `TypeArg{T}()` reaches `f` as the type `T`.
+"""
+function launch!(f::F, R, args::Vararg{Any,N}) where {F,N}
+    loop_kernel(Val(N))(get_backend(first(args)),64)(f,R[1]-oneunit(R[1]),args...,ndrange=size(R))
+    return nothing
+end
+# `@loop` wraps type arguments (e.g. `T` in `zero(T)`) at the call site, where `T` is known: in a kernel's
+# argument tuple a type is a `DataType`, and the CPU backend then calls the kernel dynamically per workgroup.
+struct TypeArg{T} end
+kernarg(::Type{T}) where T = TypeArg{T}()
+kernarg(a) = a
+@inline itemarg(::TypeArg{T}) where T = T
+@inline itemarg(a) = a
+# One kernel per number of arguments, each argument separate and typed as in a hand-written kernel:
+# a Vararg or Tuple of arguments makes the CPU kernels slower, and untyped arguments that are only
+# passed on (e.g. the convection scheme `λ`) are not specialized. The loop body is inlined.
+for n in 1:16
+    a = [Symbol(:a,k) for k in 1:n]; A = [Symbol(:A,k) for k in 1:n]; kern = Symbol(:_loop,n,:!)
+    @eval begin
+        @kernel function $kern(f::F,@Const(I0),$((:($x::$X) for (x,X) in zip(a,A))...)) where {F,$(A...)}
+            I = @index(Global,Cartesian)
+            @inline f(I+I0,$((:(itemarg($x)) for x in a)...))
+        end
+        loop_kernel(::Val{$n}) = $kern
+    end
+end
+loop_kernel(::Val{N}) where N = throw(ArgumentError("@loop: the loop body uses $N variables, at most 16 are supported"))
+
+"""
     @loop <expr> over <I ∈ R>
 
 Macro to automate fast loops using @simd when running in serial,
@@ -113,13 +148,9 @@ becomes
 
 on serial execution, or
 
-    @kernel function kern(a,i,@Const(I0))
-        I ∈ @index(Global,Cartesian)+I0
-        @fastmath @inbounds a[I,i] += sum(loc(i,I))
-    end
-    kern(get_backend(a),64)(a,i,R[1]-oneunit(R[1]),ndrange=size(R))
+    launch!((I,a,i) -> (@fastmath @inbounds a[I,i] += sum(loc(i,I)); nothing), R, a, i)
 
-when multi-threading on CPU or using CuArrays.
+when multi-threading on CPU or using CuArrays. See [`launch!`](@ref).
 Note that `get_backend` is used on the _first_ variable in `expr` (`a` in this example).
 """
 macro loop(args...)
@@ -129,21 +160,16 @@ macro loop(args...)
     grab!(sym,ex)     # get arguments and replace composites in `ex`
     setdiff!(sym,[I]) # don't want to pass I as an argument
     symT = [gensym() for _ in 1:length(sym)] # generate a list of types for each symbol
-    symWtypes = joinsymtype(rep.(sym),symT) # symbols with types: [a::A, b::B, ...]
-    @gensym(kern, kern_, r) # generate unique names for the kernel functions (serial and KA) and the range
+    symWtypes = joinsymtype(rep.(sym),symT) # symbols with types: [a::A, b::B, ...], also forces specialization on functions
     @static if backend == "KernelAbstractions"
-        return quote
-            @kernel function $kern_($(symWtypes...),@Const(I0)) where {$(symT...)} # replace composite arguments
-                $I = @index(Global,Cartesian)
-                $I += I0
+        return quote # the loop body becomes an item function of I and the grabbed arguments
+            $launch!(function ($I,$(symWtypes...)) where {$(symT...)}
                 @fastmath @inbounds $ex
-            end
-            function $kern($(symWtypes...)) where {$(symT...)}
-                $kern_(get_backend($(sym[1])),64)($(sym...),$R[1]-oneunit($R[1]),ndrange=size($R))
-            end
-            $kern($(sym...))
+                return nothing
+            end, $R, $((:($kernarg($s)) for s in sym)...))
         end |> esc
     else # backend == "SIMD"
+        @gensym(kern, r) # generate unique names for the kernel function and the range
         return quote
             function $kern($(symWtypes...)) where {$(symT...)}
                 $r = $R # `@inbounds` covers the loop, including `@simd`'s index arithmetic, but not the range
