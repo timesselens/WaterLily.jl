@@ -33,6 +33,18 @@
         @test (@allocations fillT!(a,Float32)) < 200
     end
 
+    # whole-array fills, copies and scalings, and the reductions of a time step
+    for f ∈ arrays
+        a = Float32[1 2; 3 4] |> f; b = zeros(Float32,2,2) |> f
+        WaterLily.fill_all!(b,5); @test Array(b) == fill(5f0,2,2)
+        WaterLily.copy_all!(b,a); @test Array(b) == Array(a)
+        WaterLily.mul_all!(b,2f0); @test Array(b) == 2Array(a)
+        WaterLily.div_all!(b,2f0); @test Array(b) == Array(a)
+        @test WaterLily.sum_view(a,1:2,2) == 6
+        @test WaterLily.max_all(a) == 4
+        @test WaterLily.sum_dims(Float32,a,Val(1)) == Float32[4,6]
+    end
+
     for f ∈ arrays
         Ng, D, U = (6, 6), 2, (1.0, 0.5)
         u = rand(Ng..., D) |> f # vector

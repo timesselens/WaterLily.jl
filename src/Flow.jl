@@ -27,7 +27,7 @@ end
 @fastmath median(a,b,c) = max(min(a,b),min(max(a,b),c))
 
 function conv_diff!(r,u,Φ,λ::F;ν=0.1,perdir=()) where {F}
-    r .= zero(eltype(r))
+    fill_all!(r,zero(eltype(r)))
     N,n = size_u(u)
     for i ∈ 1:n, j ∈ 1:n
         # if it is periodic direction
@@ -145,7 +145,7 @@ Integrate the `Flow` one time step using the [Boundary Data Immersion Method](ht
 and the `AbstractPoisson` pressure solver to project the velocity onto an incompressible flow.
 """
 @fastmath function mom_step!(a::AbstractFlow,b::AbstractPoisson;udf=nothing,kwargs...)
-    a.u⁰ .= a.u; scale_u!(a,0); t₁ = sum(a.Δt); t₀ = t₁-a.Δt[end]
+    copy_all!(a.u⁰,a.u); scale_u!(a,0); t₁ = sum(a.Δt); t₀ = t₁-a.Δt[end]
     # predictor u → u'
     @log "p"
     mom_predict!(a,t₀,t₁;udf,kwargs...)
@@ -213,18 +213,18 @@ On return `a.u` is divergence-free and BC-consistent.
 """
 function mom_project!(a::AbstractFlow{D,T}, b::AbstractPoisson, w, t) where {D,T}
     dt = T(w)*a.Δt[end]
-    @inside b.z[I] = div(I,a.u); b.x .*= dt # set source term & solution IC
+    @inside b.z[I] = div(I,a.u); mul_all!(b.x,dt) # set source term & solution IC
     solver!(b)
     for i ∈ 1:ndims(a.p)  # apply solution and unscale to recover pressure
         @loop a.u[I,i] -= b.L[I,i]*∂(i,I,b.x) over I ∈ inside(b.x)
     end
-    b.x ./= dt
+    div_all!(b.x,dt)
     BC!(a.u,a.uBC,a.exitBC,a.perdir,t)
 end
 
 function CFL(a::AbstractFlow;Δt_max=10)
     @inside a.σ[I] = flux_out(I,a.u)
-    min(Δt_max,inv(maximum(a.σ)+5a.ν))
+    min(Δt_max,inv(max_all(a.σ)+5a.ν))
 end
 @fastmath @inline function flux_out(I::CartesianIndex{d},u) where {d}
     s = z = zero(eltype(u))

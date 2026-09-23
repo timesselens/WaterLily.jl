@@ -1,4 +1,4 @@
-using KernelAbstractions: get_backend, @index, @kernel, @Const, supports_float64
+using KernelAbstractions: get_backend, @index, @kernel, @Const, GPU, supports_float64
 using LoggingExtras
 
 # custom log macro
@@ -257,11 +257,41 @@ Apply a 1D convection scheme to fill the ghost cell on the exit of the domain.
 function exitBC!(u,u⁰,Δt)
     N,_ = size_u(u)
     exitR = slice(N.-1,N[1],1,2)              # exit slice excluding ghosts
-    U = sum(@view(u[slice(N.-1,2,1,2),1]))/length(exitR) # inflow mass flux
+    U = sum_view(u,slice(N.-1,2,1,2),1)/length(exitR) # inflow mass flux
     @loop u[I,1] = u⁰[I,1]-U*Δt*(u⁰[I,1]-u⁰[I-δ(1,I),1]) over I ∈ exitR
-    ∮u = sum(@view(u[exitR,1]))/length(exitR)-U   # mass flux imbalance
+    ∮u = sum_view(u,exitR,1)/length(exitR)-U   # mass flux imbalance
     @loop u[I,1] -= ∮u over I ∈ exitR         # correct flux
 end
+
+# Global reductions in a time step go through these few functions (alongside `@loop` for
+# everything else on the device), so that AD rules, see `WaterLilyEnzymeCoreExt`, cover them.
+"""
+    sum_view(a,I...)
+
+Sum of `a[I...]`, i.e. `sum(@view a[I...])`.
+"""
+sum_view(a,I...) = sum(@view(a[I...]))
+"""
+    max_all(a)
+
+Largest element of `a`, i.e. `maximum(a)`.
+"""
+max_all(a) = maximum(a)
+"""
+    sum_dims(T,a,Val(n))
+
+Sum of `a` over its first `n` dimensions accumulated in type `T`, as a host `Vector{T}`.
+"""
+sum_dims(::Type{T},a,::Val{n}) where {T,n} = sum(T,a,dims=ntuple(identity,n))[:] |> Array
+
+# Whole-array fills, copies and scalings: a broadcast on the CPU, where it is fastest, and on GPUs a @loop over
+# the linear index, which is faster than a broadcast there and is covered by the AD rule of `launch!`.
+fill_all!(a,x) = (gpu(a) ? (@loop a[i] = x over i ∈ lin(a)) : (a .= x); nothing)
+copy_all!(a,b) = (gpu(a) ? (@loop a[i] = b[i] over i ∈ lin(a)) : (a .= b); nothing)
+mul_all!(a,s) = (gpu(a) ? (@loop a[i] *= s over i ∈ lin(a)) : (a .*= s); nothing)
+div_all!(a,s) = (gpu(a) ? (@loop a[i] /= s over i ∈ lin(a)) : (a ./= s); nothing)
+gpu(a) = get_backend(a) isa GPU
+lin(a) = CartesianIndices((length(a),))
 """
     perBC!(a,perdir)
 
