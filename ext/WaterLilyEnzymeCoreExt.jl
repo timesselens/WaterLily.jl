@@ -1,7 +1,7 @@
 module WaterLilyEnzymeCoreExt
 
 using WaterLily
-using WaterLily: launch!, itemarg, sum_view, max_all, sum_dims
+using WaterLily: launch!, itemarg, sum_view, max_all, sum_dims, solver!, update!, @loop, inside, δ, CIj, slice
 using EnzymeCore
 using EnzymeCore.EnzymeRules
 import KernelAbstractions as KA
@@ -215,6 +215,117 @@ function EnzymeRules.reverse(config::RevConfigWidth{1}, ::Const{typeof(sum_dims)
         ā .+= reshape(v̄, ntuple(i -> i <= n ? 1 : size(ā, i), Val(ndims(ā))))
     end
     return (nothing, nothing, nothing)
+end
+
+## multigrid coefficients
+#
+# The coarse levels of a `MultiLevelPoisson` only precondition the solve: the solution depends on the fine
+# coefficients alone, and the implicit-function rule on `solver!` (below) gives them no cotangent. So the
+# restriction of the coefficients to the coarse levels (`update!` after `measure!` for moving bodies) has
+# a zero derivative, and Enzyme does not need to differentiate its loops.
+EnzymeRules.inactive(::typeof(WaterLily.restrictL!), args...) = nothing
+
+## pressure Poisson solve
+#
+# `solver!` iterates to a tolerance, so rather than differentiating the iterations the rule uses the
+# implicit function theorem on the solution of A(L,D) x = z, which `pin_pressure!` makes unique (zero mean
+# over the active cells, zero on the inactive ones). A is symmetric (the face coefficient L[I,i] couples I and
+# I-δᵢ in both rows), so λ = A⁺x̄ comes from the same solver, pinned the same way, run in a separate workspace
+# so the primal arrays keep their values for the rest of the reverse pass. x̄ is projected like x first, so the
+# adjoint system has a solution. Then z̄ += λ and L̄, D̄ -= λxᵀ on A's sparsity pattern; the initial guess,
+# residual and multigrid scratch arrays get no cotangent. The adjoint solve stops at the relative residual the
+# primal solve reached (so a tighter `tol` in `poisson_kwargs` gives both).
+
+const _Poissons = Union{WaterLily.Poisson,WaterLily.MultiLevelPoisson}
+# Enzyme may pass a solver as MixedDuplicated (shadow in a Ref)
+const _PoissonArg = Union{Duplicated{<:_Poissons},MixedDuplicated{<:_Poissons}}
+_shadow(p::Duplicated) = p.dval
+_shadow(p::MixedDuplicated) = p.dval[]
+_fine(p::WaterLily.Poisson) = p
+_fine(p::WaterLily.MultiLevelPoisson) = first(p.levels)
+
+function EnzymeRules.augmented_primal(config::RevConfigWidth{1}, func::Const{typeof(solver!)}, ::Type{RT},
+        p::_PoissonArg; kwargs...) where {RT}
+    zmax = maximum(abs, p.val.z)
+    ret = func.val(p.val; kwargs...)
+    rtol = WaterLily.L∞(_fine(p.val)) / max(zmax, floatmin(zmax)) # the relative residual the solve reached
+    tape = (copy(p.val.x), copy(p.val.L), rtol) # L (= μ₀) is overwritten by the next measure!
+    return AugmentedReturn(needs_primal(config) ? ret : nothing, nothing, tape)
+end
+
+function EnzymeRules.reverse(config::RevConfigWidth{1}, func::Const{typeof(solver!)}, ::Type{RT}, (x, L, rtol),
+        p::_PoissonArg; kwargs...) where {RT}
+    P, dP = p.val, _shadow(p)
+    x̄ = _fine(dP).x
+    _perBC_adjoint!(x̄, P.perdir) # the solve ends by copying periodic ghosts from the interior
+    ws = _workspace(P)
+    copyto!(ws.L, L); update!(ws)
+    # the part of x̄ in A's range, projected as the solve pins x. Without it a constant can remain on the active
+    # cells when some are inactive (`residual!` removes the mean over all interior cells), and the solve turns it
+    # into errors in λ
+    copyto!(ws.x, x̄); WaterLily.pin_pressure!(_fine(ws)); copyto!(ws.z, ws.x)
+    x̄max = maximum(abs, @view(ws.z[inside(ws.z)]))
+    if x̄max > 0
+        fill!(ws.x, 0)
+        # adjoint solved to the relative accuracy the primal solve reached; other keywords (e.g. `itmx`) as given
+        solver!(ws; kwargs..., tol = clamp(rtol, 10eps(eltype(x)), 1e-2) * x̄max) # λ = ws.x, pinned
+        fdP = _fine(dP)
+        _accumulate!(fdP.z, fdP.L, fdP.D, ws.x, x)
+    end
+    _zero_scratch!(dP)
+    return (nothing,)
+end
+
+# adjoint solver with its own arrays, cached per primal solver. The cache is keyed by the identity of the
+# solution array (a WeakKeyDict would hash GPU arrays by value, element by element) and holds it weakly:
+# workspaces of collected solvers are dropped when the next one is made.
+const _workspaces = Dict{UInt,Tuple{WeakRef,Any}}()
+const _workspaces_lock = ReentrantLock()
+function _workspace(P)
+    lock(_workspaces_lock) do
+        entry = get(_workspaces, objectid(P.x), nothing)
+        entry !== nothing && entry[1].value === P.x && return entry[2]
+        filter!(kv -> last(kv)[1].value !== nothing, _workspaces)
+        ws = _new_workspace(P)
+        _workspaces[objectid(P.x)] = (WeakRef(P.x), ws)
+        return ws
+    end
+end
+_new_workspace(P::WaterLily.MultiLevelPoisson) = WaterLily.MultiLevelPoisson(zero(P.x), copy(P.L), zero(P.z);
+    perdir = P.perdir, maxlevels = length(P.levels) - 1)
+_new_workspace(P::WaterLily.Poisson) = WaterLily.Poisson(zero(P.x), copy(P.L), zero(P.z); perdir = P.perdir)
+
+# transpose of `perBC!` (ghost ← interior copies): ghost cotangents go back to their source cells
+_perBC_adjoint!(a, ::Tuple{}) = nothing
+function _perBC_adjoint!(a, perdir, N = size(a))
+    for j in reverse(perdir)
+        @loop (a[CIj(j, I, 2)] += a[I]; a[I] = zero(eltype(a))) over I ∈ slice(N, N[j], j)
+        @loop (a[CIj(j, I, N[j] - 1)] += a[I]; a[I] = zero(eltype(a))) over I ∈ slice(N, 1, j)
+    end
+end
+
+# z̄ += λ; L̄, D̄ -= λxᵀ where (Ax)[I] = D[I]x[I] + Σᵢ L[I,i]x[I-δᵢ] + L[I+δᵢ,i]x[I+δᵢ]
+function _accumulate!(z̄, L̄, D̄, λ, x)
+    @loop z̄[I] += λ[I] over I ∈ inside(λ)
+    for i in 1:ndims(λ)
+        @loop L̄[I, i] -= λ[I] * x[I - δ(i, I)] over I ∈ inside(λ)
+        @loop L̄[I + δ(i, I), i] -= λ[I] * x[I + δ(i, I)] over I ∈ inside(λ)
+    end
+    @loop D̄[I] -= λ[I] * x[I] over I ∈ inside(λ)
+end
+
+# the solution does not depend on the interior initial guess, nor on the scratch arrays
+_zero_inside!(a) = @loop a[I] = zero(eltype(a)) over I ∈ inside(a)
+function _zero_scratch!(dp::WaterLily.Poisson)
+    _zero_inside!(dp.x); fill!(dp.r, 0); fill!(dp.ϵ, 0)
+    return nothing
+end
+function _zero_scratch!(dp::WaterLily.MultiLevelPoisson)
+    _zero_scratch!(first(dp.levels))
+    for l in dp.levels[2:end]
+        fill!(l.x, 0); fill!(l.r, 0); fill!(l.ϵ, 0); fill!(l.z, 0)
+    end
+    return nothing
 end
 
 end # module
