@@ -17,6 +17,16 @@
     @test sim_time(sim) == 0
     sim_step!(sim,0.1,remeasure=false)
     @test sim_time(sim) ≥ 0.1 > sum(sim.flow.Δt[1:end-2])*sim.U/sim.L
+    # evolve!: sim_step!(sim,t_end) runs through it; a running cost equals the hand-written loop
+    sim₁ = Simulation(nm,(1,0),radius; body=AutoBody(circle), ν, T)
+    sim₂ = Simulation(nm,(1,0),radius; body=AutoBody(circle), ν, T)
+    J = evolve!(s -> (sim_step!(s,remeasure=false); WaterLily.pressure_force(s)[1]), sim₁, 1; max_steps=3, init=zero(T))
+    J₂ = zero(T); for _ ∈ 1:3; sim_step!(sim₂,remeasure=false); J₂ += WaterLily.pressure_force(sim₂)[1]; end
+    @test J == J₂ && sim₁.flow.u == sim₂.flow.u && length(sim₁.flow.Δt) == 4
+    @test isnothing(evolve!(sim_step!, sim₁, Inf; max_steps=2)) && length(sim₁.flow.Δt) == 6
+    sim₃ = Simulation(nm,(1,0),radius; body=AutoBody(circle), ν, T) # sim_step!(sim,0.1) is the loop it replaces
+    while sim_time(sim₃) < 0.1; sim_step!(sim₃,remeasure=false); end
+    @test sim₃.flow.u == sim.flow.u && sim₃.flow.Δt == sim.flow.Δt
     for mem ∈ arrays, exitBC ∈ (true,false)
         # Test that remeasure works perfectly when V = U = 1
         sim = Simulation(nm,(1,0),radius; body=AutoBody(circle,move), ν, T, mem, exitBC)

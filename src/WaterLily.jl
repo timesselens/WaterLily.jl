@@ -133,15 +133,35 @@ If the `udf` user keyword arguments, these needs to be included in the `sim_step
 """
 function sim_step!(sim::AbstractSimulation,t_end;remeasure=true,max_steps=typemax(Int),verbose=false,
         udf=nothing,kwargs...)
-    steps₀ = length(sim.flow.Δt)
-    while sim_time(sim) < t_end && length(sim.flow.Δt) - steps₀ < max_steps
+    evolve!(sim,t_end;max_steps,verbose) do sim
         sim_step!(sim; remeasure, udf, kwargs...)
+    end
+    return nothing
+end
+"""
+    evolve!(step!,sim::AbstractSimulation,t_end;max_steps=typemax(Int),verbose=false,init=nothing)
+
+Call `step!(sim)` until the dimensionless time `t_end` (or `max_steps` steps), and return `init`
+plus the sum of what `step!` returns (values of `nothing` are skipped). `sim_step!(sim,t_end)` is
+`evolve!` with a plain time step; a running cost, e.g. a time-averaged force, is accumulated by
+returning it from `step!` (with `init` a zero of its type).
+"""
+function evolve!(step!::F,sim::AbstractSimulation,t_end;max_steps=typemax(Int),verbose=false,init=nothing) where F
+    steps₀ = length(sim.flow.Δt); J = init
+    while sim_time(sim) < t_end && length(sim.flow.Δt) - steps₀ < max_steps
+        J = accumulate_cost(J,step!(sim))
         verbose && sim_info(sim)
     end
+    return J
 end
+accumulate_cost(J,::Nothing) = J
+accumulate_cost(::Nothing,c) = c
+accumulate_cost(::Nothing,::Nothing) = nothing
+accumulate_cost(J,c) = J+c
 function sim_step!(sim::AbstractSimulation;remeasure=true,udf=nothing,kwargs...)
     remeasure && measure!(sim)
     mom_step!(sim.flow, sim.pois; udf, kwargs...)
+    return nothing
 end
 
 """
@@ -166,7 +186,7 @@ Perturb the velocity field of a simulation with `noise` level with respect to ve
 """
 perturb!(sim::AbstractSimulation; noise=0.1) = sim.flow.u .+= randn(size(sim.flow.u))*sim.U*noise |> typeof(sim.flow.u).name.wrapper
 
-export AbstractSimulation,Simulation,sim_step!,sim_time,measure!,sim_info,perturb!
+export AbstractSimulation,Simulation,sim_step!,evolve!,sim_time,measure!,sim_info,perturb!
 
 # defaults JLD2 and VTK I/O functions
 function load!(sim::AbstractSimulation; kwargs...)
