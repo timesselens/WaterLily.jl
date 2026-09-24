@@ -81,3 +81,20 @@ end
         @test all(sim.pois.n .≤ 12) && !any(isnan.(sim.pois.n))
     end
 end
+
+@testset "pin_pressure!" begin
+    # the solution's constant is fixed: zero mean over the active cells, zero on the inactive ones (inside a
+    # solid block), and the same result whatever constant the initial guess holds
+    for f ∈ arrays, poisson ∈ (Poisson,MultiLevelPoisson)
+        T = Float32; N = (2^5+2,2^5+2); R = inside(zeros(N))
+        L = ones(T,N...,2); L[12:18,12:18,:] .= 0; BC!(L,ntuple(zero,2))
+        p = poisson(zeros(T,N) |> f,L |> f,zeros(T,N) |> f)
+        soln = map(I->T(sin(I.I[1]/3)*cos(I.I[2]/5)),CartesianIndices(N)) |> f
+        mult!(p,soln); solver!(p); x₁ = Array(p.x)
+        act = Array(p isa MultiLevelPoisson ? p.levels[1].iD : p.iD)[R] .!= 0
+        @test count(.!act) == 36 && all(iszero,x₁[R][.!act])
+        @test abs(sum(x₁[R][act]))/count(act) < 1e-5*maximum(abs,x₁)
+        fill!(p.x,3); mult!(p,soln); solver!(p)
+        @test Array(p.x)[R] ≈ x₁[R] rtol=1e-4 # (the ghosts keep the initial guess: the solver never writes them)
+    end
+end
