@@ -208,6 +208,8 @@ Approximate iterative solver for the Poisson matrix equation `Ax=b`.
         Convergence also requires the mean residual `Σ|r|/N < tol/10` (same units as the
         max-norm, no hidden exponents: the bulk sits 10× below the cap).
   - `itmx`: Maximum number of iterations.
+
+The solution's constant, which `Ax=z` leaves free, is fixed by [`pin_pressure!`](@ref).
 """
 function solver!(p::Poisson;tol=2e-3,itmx=1e3)
     r₁tol = l1n_tol(p, tol); r∞tol = tol
@@ -218,6 +220,21 @@ function solver!(p::Poisson;tol=2e-3,itmx=1e3)
         @log ", $nᵖ, $r∞, $r₁\n"
         (r₁<r₁tol && r∞<r∞tol) && break
     end
-    perBC!(p.x,p.perdir)
+    pin_pressure!(p); perBC!(p.x,p.perdir)
     push!(p.n,nᵖ)
+end
+
+"""
+    pin_pressure!(p::Poisson)
+
+Fix the constant of the solution `p.x`, which `Ax=z` leaves free: subtract its mean over the active cells
+(`iD≠0`) and zero the inactive ones (inside a body, where the operator is zero). Otherwise the constant is
+whatever the initial guess and the iterations leave, and forces pick it up where the discrete `∮n ds` of
+a body is not exactly zero.
+"""
+function pin_pressure!(p::Poisson)
+    n = count(!=(0),p.iD); n==0 && return # iD is zero on the ghosts too: whole-array reductions are the interior ones
+    @loop p.ϵ[I] = ifelse(p.iD[I]==0,zero(eltype(p.x)),p.x[I]) over I ∈ CartesianIndices(p.ϵ) # ϵ is free after the solve
+    s = sum(p.ϵ)/n
+    @inside p.x[I] = ifelse(p.iD[I]==0,zero(eltype(p.x)),p.x[I]-s)
 end

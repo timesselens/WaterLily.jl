@@ -123,6 +123,6 @@ function solver!(ml::MultiLevelPoisson{T};tol=2e-3,itmx=32) where T
         r₁ = rnew
         (r₁<r₁tol && r∞<r∞tol) && break
     end
-    perBC!(p.x,p.perdir)
+    pin_pressure!(p); perBC!(p.x,p.perdir)
     push!(ml.n,nᵖ);
 end
