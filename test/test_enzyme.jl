@@ -105,6 +105,12 @@ running_force(sim, θ) = (sim.body = plate(θ, sim.L); measure!(sim);
         sim_step!(s; remeasure=false, poisson_kwargs=solve_kw(s))
         s.flow.Δt[end-1] * WaterLily.total_force(s)[2]
     end)
+# a cost that doesn't infer (`sim_time`: `Simulation`'s U and L are abstract): the evolve! rule stops with an error
+unstable_cost(sim, θ) = (sim.body = plate(θ, sim.L); measure!(sim);
+    oftype(θ, evolve!(sim, 1e9; max_steps=1, init=zero(θ)) do s
+        sim_step!(s; remeasure=false)
+        sim_time(s) * WaterLily.pressure_force(s)[1]
+    end))
 # a circle whose radius is a parameter inside the sdf, off the grid's symmetry: its pressure force depends, at grid
 # level, on the pressure's constant, so this checks that the constant (pinned after every solve) gets no derivative
 circle_r(r, L) = AutoBody((x, _) -> √sum(abs2, x - SA[oftype(r, 1.6L), oftype(r, 0.95L)]) - r*L)
@@ -223,8 +229,14 @@ forward_du(v) = ForwardDiff.derivative(ϵ -> (sim = mover_sim(typeof(ϵ)); sim.f
     @test g1 ≈ forward_dθ(one_step, θ₀) rtol=1e-6
     g3 = enzyme_dθ(three_steps, θ₀)
     @test g3 ≈ forward_dθ(three_steps, θ₀) rtol=1e-6
-    @test enzyme_dθ(running_cost, θ₀) ≈ forward_dθ(running_cost, θ₀) rtol=1e-6
-    @test enzyme_dθ(running_force, θ₀) ≈ forward_dθ(running_force, θ₀) rtol=1e-6
+    if v"1.11" <= VERSION < v"1.12" # a cost accumulated by evolve! hits EnzymeAD/Enzyme.jl#3322 on Julia 1.11
+        @test_broken enzyme_dθ(running_cost, θ₀) ≈ forward_dθ(running_cost, θ₀) rtol=1e-6
+        @test_broken enzyme_dθ(running_force, θ₀) ≈ forward_dθ(running_force, θ₀) rtol=1e-6
+    else
+        @test enzyme_dθ(running_cost, θ₀) ≈ forward_dθ(running_cost, θ₀) rtol=1e-6
+        @test enzyme_dθ(running_force, θ₀) ≈ forward_dθ(running_force, θ₀) rtol=1e-6
+    end
+    @test_throws "make the step function type-stable" enzyme_dθ(unstable_cost, θ₀)
     let r₀ = 0.5, sim = circle_sim(r₀) # a parameter inside the sdf; a cost not invariant to the pressure's constant
         gr = autodiff(rev, drag_step, Active, Duplicated(sim, Enzyme.make_zero(sim)), Active(r₀))[1][2]
         @test gr ≈ ForwardDiff.derivative(r -> drag_step(circle_sim(r), r), r₀) rtol=1e-6

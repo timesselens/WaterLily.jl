@@ -349,6 +349,11 @@ end
 function EnzymeRules.augmented_primal(config::RevConfigWidth{1}, ::Const{typeof(evolve!)}, ::Type{RT},
         f::Annotation, sim::Duplicated{<:AbstractSimulation}, t_end::Annotation;
         max_steps = typemax(Int), verbose = false, init = nothing) where {RT}
+    # a cost that doesn't infer reaches the rule as `Duplicated{Any}`, which the checkpointed replay can't seed
+    RT <: Const || isconcretetype(eltype(RT)) || error("WaterLily evolve!: the cost of the step function is inferred ",
+        "as `$(eltype(RT))`, so Enzyme can't tell whether it is active; make the step function type-stable. For ",
+        "example, `sim_time(sim)` is not inferred (`Simulation`'s `U` and `L` are abstract): use ",
+        "`WaterLily.time(sim.flow)*U/L` with `U` and `L` of a concrete type")
     s, ds = sim.val, sim.dval
     steps₀ = length(s.flow.Δt); snaps = Any[]; J = init
     while sim_time(s) < t_end.val && length(s.flow.Δt) - steps₀ < max_steps
