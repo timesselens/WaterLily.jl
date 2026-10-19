@@ -137,6 +137,42 @@ Summed over the cells it telescopes: a uniform pressure or stress gives exactly 
 end
 
 """
+    Measured(sim)
+
+The body as `measure!` left it in `sim.flow`: the fluid fraction `μ₀` of every cell face, for the kernel width `ϵ`.
+The force and moment integrals read these fractions instead of measuring the body again. For the Poisson solve,
+`BC!` sets the fraction of the domain's boundary faces to zero. Near the body those faces are measured again; further
+out they take the value of the next face in, which there is 0 or 1.
+"""
+struct Measured{A,P,B,T} <: AbstractBody
+    μ₀ :: A
+    perdir :: P
+    body :: B
+    ϵ :: T
+end
+Measured(sim) = Measured(sim.flow.μ₀,sim.flow.perdir,sim.body,eltype(sim.flow.p)(sim.ϵ))
+measure(m::Measured,x,t;kwargs...) = measure(m.body,x,t;kwargs...)
+using Adapt: @adapt_structure
+@adapt_structure Measured
+
+"""
+    nds(body,I,x,t)
+
+`nds(body,x,t)` of the cell `I` centred at `x`. For `Measured`, the jump of the stored fractions across the cell;
+cells outside `measure!`'s band, |d| ≥ 2+ϵ, are skipped, as there the fractions are 0 or 1.
+"""
+@inline nds(body,I,x,t) = nds(body,x,t)
+@inline function nds(m::Measured,I::CartesianIndex{D},x::AbstractVector{T},t) where {D,T}
+    e(i) = SVector(ntuple(j->T(j==i)/2,D))
+    near(m.body,x,t,m.ϵ) ? fSV(i->μ₀(m,I+δ(i,I),i,x+e(i),t)-μ₀(m,I,i,x-e(i),t),D) : zero(SVector{D,T})
+end
+@inline μ₀(m::Measured,J,i,y,t) = onboundary(m,J,i) ? remeasured(m,J,i,y,t) : @inbounds m.μ₀[J,i]
+@inline onboundary(m,J,i) = i ∉ m.perdir && J[i] ∈ (2,size(m.μ₀,i))
+@inline remeasured(m,J,i,y,t) = near(m.body,y,t,m.ϵ) ? μ₀(oftype(m.ϵ,sdf(m.body,y,t,fastd²=(2+m.ϵ)^2)),m.ϵ) : @inbounds m.μ₀[inward(m,J,i),i]
+@inline inward(m,J,i) = CIj(i,J,clamp(J[i],3,size(m.μ₀,i)-1))
+@inline near(body,x,t,ϵ) = abs(sdf(body,x,t,fastd²=(2+ϵ)^2)) < 2+ϵ
+
+"""
     sumdims(df)
 
 Sum the workspace `df` over the domain in its own element type, returning one value per component.
@@ -148,11 +184,11 @@ sumdims(df) = sum(df,dims=ntuple(i->i,ndims(df)-1))[:] |> Array
 
 Compute the pressure force on an immersed body.
 """
-pressure_force(sim) = pressure_force(sim.flow,sim.body)
+pressure_force(sim) = pressure_force(sim.flow,Measured(sim))
 pressure_force(flow,body) = pressure_force(flow.p,flow.f,body,time(flow))
 function pressure_force(p,df,body,t=0)
     df .= zero(eltype(p))
-    @loop df[I,:] .= p[I]*nds(body,loc(0,I,eltype(p)),t) over I ∈ bbox(body,inside(p))
+    @loop df[I,:] .= p[I]*nds(body,I,loc(0,I,eltype(p)),t) over I ∈ bbox(body,inside(p))
     sumdims(df)
 end
 
@@ -162,14 +198,14 @@ end
 Rate-of-strain tensor.
 """
 @inline S(I::CartesianIndex{D},u) where D = SMatrix{D,D}((∂(i,j,I,u)+∂(j,i,I,u))/2 for i ∈ 1:D, j ∈ 1:D)
-@inline Snds(I,u,body,t) = (n = nds(body,loc(0,I,eltype(u)),t); iszero(n) ? n : S(I,u)*n)
+@inline Snds(I,u,body,t) = (n = nds(body,I,loc(0,I,eltype(u)),t); iszero(n) ? n : S(I,u)*n)
 
 """
     viscous_force(sim)
 
 Compute the viscous force on an immersed body.
 """
-viscous_force(sim) = viscous_force(sim.flow,sim.body)
+viscous_force(sim) = viscous_force(sim.flow,Measured(sim))
 viscous_force(flow,body) = viscous_force(flow.u,flow.ν,flow.f,body,time(flow))
 function viscous_force(u,ν,df,body,t=0)
     df .= zero(eltype(u))
@@ -183,14 +219,14 @@ end
 Total stress tensor (pressure and viscous) acting on the body surface, so that `τ⋅nds` is the force density.
 """
 @inline τ(I::CartesianIndex{D},p,u,ν) where D = (s = S(I,u); p[I]*one(s)-2ν*s)
-@inline τnds(I,p,u,ν,body,t) = (n = nds(body,loc(0,I,eltype(p)),t); iszero(n) ? n : τ(I,p,u,ν)*n)
+@inline τnds(I,p,u,ν,body,t) = (n = nds(body,I,loc(0,I,eltype(p)),t); iszero(n) ? n : τ(I,p,u,ν)*n)
 
 """
     total_force(sim)
 
 Compute the total force on an immersed body.
 """
-total_force(sim) = total_force(sim.flow,sim.body)
+total_force(sim) = total_force(sim.flow,Measured(sim))
 total_force(flow,body) = total_force(flow.p,flow.u,flow.ν,flow.f,body,time(flow))
 function total_force(p,u,ν,df,body,t=0)
     df .= zero(eltype(p))
@@ -205,11 +241,11 @@ using LinearAlgebra: cross
 Computes the pressure moment on an immersed body relative to point x₀.
 `x₀` is converted to the element type of the pressure field.
 """
-pressure_moment(x₀,sim) = pressure_moment(x₀,sim.flow,sim.body)
+pressure_moment(x₀,sim) = pressure_moment(x₀,sim.flow,Measured(sim))
 pressure_moment(x₀,flow,body) = pressure_moment(x₀,flow.p,flow.f,body,time(flow))
 function pressure_moment(x₀,p,df,body,t=0)
     df .= zero(eltype(p)); x₀ = eltype(p).(x₀)
-    @loop df[I,:] .= p[I]*cross(loc(0,I,eltype(p))-x₀,nds(body,loc(0,I,eltype(p)),t)) over I ∈ bbox(body,inside(p))
+    @loop df[I,:] .= p[I]*cross(loc(0,I,eltype(p))-x₀,nds(body,I,loc(0,I,eltype(p)),t)) over I ∈ bbox(body,inside(p))
     sumdims(df)
 end
 
@@ -219,7 +255,7 @@ end
 Computes the viscous moment on an immersed body relative to point x₀.
 `x₀` is converted to the element type of the velocity field.
 """
-viscous_moment(x₀,sim) = viscous_moment(x₀,sim.flow,sim.body)
+viscous_moment(x₀,sim) = viscous_moment(x₀,sim.flow,Measured(sim))
 viscous_moment(x₀,flow,body) = viscous_moment(x₀,flow.u,flow.ν,flow.f,body,time(flow))
 function viscous_moment(x₀,u,ν,df,body,t=0)
     df .= zero(eltype(u)); x₀ = eltype(u).(x₀)
@@ -232,7 +268,7 @@ end
 
 Computes the total (pressure + viscous) moment on an immersed body relative to point x₀.
 """
-total_moment(x₀,sim) = total_moment(x₀,sim.flow,sim.body)
+total_moment(x₀,sim) = total_moment(x₀,sim.flow,Measured(sim))
 total_moment(x₀,flow,body) = total_moment(x₀,flow.p,flow.u,flow.ν,flow.f,body,time(flow))
 function total_moment(x₀,p,u,ν,df,body,t=0)
     df .= zero(eltype(p)); x₀ = eltype(p).(x₀)
@@ -246,7 +282,7 @@ end
 Computes the total force and the total moment relative to point x₀ in a single pass over the body.
 The moment is accumulated in `flow.u⁰`, which is free between time steps.
 """
-total_force_and_moment(x₀,sim) = total_force_and_moment(x₀,sim.flow,sim.body)
+total_force_and_moment(x₀,sim) = total_force_and_moment(x₀,sim.flow,Measured(sim))
 total_force_and_moment(x₀,flow,body) = total_force_and_moment(x₀,flow.p,flow.u,flow.ν,flow.f,flow.u⁰,body,time(flow))
 function total_force_and_moment(x₀,p,u,ν,df,dm,body,t=0)
     df .= zero(eltype(p)); dm .= zero(eltype(p)); x₀ = eltype(p).(x₀)

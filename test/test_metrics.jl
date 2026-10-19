@@ -93,6 +93,17 @@ import WaterLily: ×
         x₀ = SA[4f0,8,8]; F,M = WaterLily.total_force_and_moment(x₀,sim)
         @test F ≈ WaterLily.pressure_force(sim)+WaterLily.viscous_force(sim) ≈ WaterLily.total_force(sim)
         @test M ≈ WaterLily.pressure_moment(x₀,sim)+WaterLily.viscous_moment(x₀,sim) ≈ WaterLily.total_moment(x₀,sim)
+        # the measured fractions give the body's own integrals
+        @test WaterLily.pressure_force(sim) ≈ WaterLily.pressure_force(sim.flow,sim.body)
+        @test WaterLily.viscous_force(sim) ≈ WaterLily.viscous_force(sim.flow,sim.body)
+        # a half disk on the bottom wall under a uniform pressure: p × chord on its wetted surface
+        cut = Simulation((32,32),(1,0),12;body=AutoBody((x,t)->√sum(abs2,x.-SA[16,0])-6),mem=f)
+        cut.flow.p .= 1
+        @test WaterLily.pressure_force(cut.flow,cut.body) ≈ [0,12]
+        @test WaterLily.pressure_force(cut) ≈ [0,12] # BC! closed the boundary faces: there the body is measured
+        low = Simulation((32,32),(1,0),12;body=AutoBody((x,t)->√sum(abs2,x.-SA[16.3,7])-6),mem=f)
+        low.flow.p .= 1 # one cell above the wall, not cut
+        @test WaterLily.pressure_force(low) ≈ [0,0] atol=1e-5
         # temporal averages
         T = Float32
         sim = make_bl_flow(; T, mem=f)
