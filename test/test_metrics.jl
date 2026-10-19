@@ -54,7 +54,13 @@ import WaterLily: ×
         @inside p[I] = loc(0, I, eltype(p))[2]
         body = AutoBody((x,t)->√sum(abs2,x.-(N/2))-N÷4,(x,t)->x)
         force = WaterLily.pressure_force(p,df₂,body)
-        @test sum(abs,force/(π*(N/4)^2) - [0,1]) < 2e-3
+        m₂ = 1/3-2/π^2 # second moment of the BDIM kernel
+        @test force ≈ [0,π*((N/4)^2+m₂)] rtol=1e-3 # ∮ y n ds over the smoothed circle
+        far = AutoBody((x,t)->(d = √sum(abs2,x.-(N/2))-N÷4; d<4 ? d : -4one(d))) # good only near the surface
+        @test WaterLily.pressure_force(p,df₂,far) == force
+        p .= 1; offgrid = AutoBody((x,t)->√sum(abs2,x.-(N/2+0.3,N/2+0.7))-N÷4)
+        @test WaterLily.pressure_force(p,df₂,offgrid) ≈ [0,0] atol=1e-10 # ∮ n ds = 0, also off the grid's symmetry
+        @test WaterLily.pressure_moment(SA[3.0,5.0],p,df₂,offgrid,0)[1] ≈ 0 atol=1e-10 # ∮ x×n ds = 0
         # stress tensor
         u₂ = zeros(N,N,2) |> f
         u₃ = zeros(N,N,N,3) |> f
@@ -79,8 +85,8 @@ import WaterLily: ×
         # pressure moment
         p₂ = zeros(N,N) |> f; apply!(x->x[2],p₂)
         p₃ = zeros(N,N,N) |> f; apply!(x->x[2],p₃)
-        @test WaterLily.pressure_moment(SVector{2,Float64}(N/2,N/2),p₂,df₂,body,0)[1] ≈ 0 # no moment in hydrostatic pressure
-        @test all(WaterLily.pressure_moment(SVector{3,Float64}(N/2,N/2,N/2),p₃,df₃,body,0) .≈ SA[0 0 0]) # with a 3D field, 3D moments
+        @test WaterLily.pressure_moment(SVector{2,Float64}(N/2,N/2),p₂,df₂,body,0)[1] ≈ 0 atol=1e-10 # no moment in hydrostatic pressure
+        @test all(isapprox.(WaterLily.pressure_moment(SVector{3,Float64}(N/2,N/2,N/2),p₃,df₃,body,0),0,atol=1e-10)) # with a 3D field, 3D moments
         # fused force and moment
         sim = Simulation((16,16,16),(1,0,0),8;body=AutoBody((x,t)->√sum(abs2,x.-8)-4),mem=f)
         copyto!(sim.flow.p,rand(Float32,size(sim.flow.p))); copyto!(sim.flow.u,rand(Float32,size(sim.flow.u)))

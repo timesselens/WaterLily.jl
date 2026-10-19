@@ -76,3 +76,15 @@ end
     println("▶ Allocated (aniso sim_step! remeasure) "*@sprintf("%.2f", r.memory/1e3)*" KiB")
     @test r.memory < 1000 # less than 1 KiB; ~0.45 KiB clean, ~2 KiB if a V-cycle call boxes
 end
+
+@testset "force allocations" begin
+    # a Float64 literal in the sdf of a Float32 simulation, as in many scripts: the force functions keep one type
+    sim = Simulation((64,32),(1,0),16;ν=0.16,body=AutoBody((x,t)->√sum(abs2,x.-SA[24,16])-16/2),T=Float32)
+    sim_step!(sim)
+    for f in (WaterLily.pressure_force, WaterLily.viscous_force, WaterLily.total_force)
+        b = @benchmarkable $f($sim) samples=100; tune!(b)
+        r = run(b)
+        println("▶ Allocated ($f) "*@sprintf("%.2f", r.memory/1e3)*" KiB")
+        @test r.memory < 1000 # less than 1 KiB; ~0.2 KiB clean, ~190 KiB if a face's fraction changes type
+    end
+end

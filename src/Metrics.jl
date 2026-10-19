@@ -122,11 +122,18 @@ end
 """
     nds(body,x,t)
 
-BDIM-masked surface normal.
+BDIM-masked surface normal at `x`, the surface element `n ds` that the cell centred there holds: the jump of the
+fluid fraction `μ₀(d)` across the cell,
+
+    nds = Σᵢ eᵢ [μ₀(d(x+eᵢ/2)) - μ₀(d(x-eᵢ/2))].
+
+Summed over the cells it telescopes: a uniform pressure or stress gives exactly zero force. Outside `measure!`'s band,
+|d| ≥ 3, the fraction is 0 or 1 on every face, so only the cells inside the band are measured.
 """
 @inline function nds(body,x::AbstractVector{T},t) where T
-    d,n,_ = measure(body,x,t,fastd²=one(T))
-    n*WaterLily.kern(clamp(d,-1,1))
+    D = length(x); d(x) = T(sdf(body,x,t,fastd²=T(9)))
+    e(i) = SVector(ntuple(j->T(j==i)/2,D))
+    abs(d(x)) < 3 ? fSV(i->μ₀(d(x+e(i)),one(T))-μ₀(d(x-e(i)),one(T)),D) : zero(SVector{D,T})
 end
 
 """
